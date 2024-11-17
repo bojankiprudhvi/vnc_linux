@@ -18,7 +18,7 @@
 #include <X11/Xutil.h>
 #include <sys/shm.h>  // For shmat and shmdt
  // Include OpenCV headers
-
+#include <fstream> 
 extern "C" {
 #define restrict __restrict
 #include <neatvnc.h>
@@ -33,9 +33,8 @@ extern "C" {
 
 class VncServer {
 public:
-    VncServer(uint32_t width = 1920, uint32_t height = 1080, int port = 5900)
-        : width(width), height(height), port(port), fb_pool(nullptr), server(nullptr), display(nullptr), aml(nullptr),
-          xDisplay(nullptr), xShmInfo(nullptr), shmBuffer(nullptr) {
+    VncServer(uint32_t width = 960, uint32_t height = 540, int port = 5900)
+        : width(width), height(height), port(port), fb_pool(nullptr), server(nullptr), display(nullptr), aml(nullptr) {
         framebuffer = new uint32_t[width * height];  // Allocate framebuffer dynamically
     }
 
@@ -44,24 +43,17 @@ public:
             eventLoopThread.join();
         }
         delete[] framebuffer;  // Free framebuffer memory
-        if (shmBuffer) {
-            XShmDetach(xDisplay, xShmInfo);
-            shmdt(shmBuffer);  // Detach shared memory
-        }
     }
-
-    uint32_t* getFramebuffer() {
+     uint32_t* getFramebuffer() {
         return framebuffer;
     }
-
-    static void on_sigint() {
-        aml_exit(aml_get_default());
-    }
-
+    static void on_sigint()
+{
+	aml_exit(aml_get_default());
+}
     bool start() {
         aml = aml_new();
-        aml_set_default(aml);
-
+    aml_set_default(aml);
         server = nvnc_open("0.0.0.0", port);
         if (!server) {
             std::cerr << "Failed to open VNC server on port " << port << std::endl;
@@ -85,24 +77,11 @@ public:
             return false;
         }
 
-        // Initialize X11 and XShm
-        xDisplay = XOpenDisplay(nullptr);
-        if (!xDisplay) {
-            std::cerr << "Failed to open X display." << std::endl;
-            return false;
-        }
-
-        // Set up shared memory
-        xShmInfo = new XShmSegmentInfo();
-        XShmAttach(xDisplay, xShmInfo);
-        shmBuffer = static_cast<unsigned char*>(shmat(xShmInfo->shmid, nullptr, 0));
-
         std::cout << "VNC server started on port " << port << std::endl;
 
         eventLoopThread = std::thread([this]() {
-            aml_run(aml);
-        });
-
+        aml_run(aml);
+    });
         return true;
     }
 
@@ -131,34 +110,39 @@ public:
         nvnc_display_feed_buffer(display, fb, &damage);
 
         pixman_region_fini(&damage);
-        nvnc_fb_pool_release(fb_pool, fb);
+         std::cout << "nvnc_fb_unref \n"  << std::endl;
+      // nvnc_fb_pool_release(fb_pool, fb);
+      nvnc_fb_unref(fb);
     }
 
-    void captureScreen() {
-       cv::VideoCapture cap(0); // Open the default camera
-       if (!cap.isOpened()) {
-           std::cerr << "Error: Cannot open camera!" << std::endl;
-           return;
-       }
 
-       cv::Mat frame;
-       cap >> frame; // Capture a frame
+   void captureScreen() {
+    std::string folderPath ="/home/prudhviraj/neatvnc_build/example/video_converte/frames";
+    static int frameCount = 1; // Keep track of the current frame
+    char fileName[256];
+    snprintf(fileName, sizeof(fileName), "%s/frame_%d.raw", folderPath.c_str(), frameCount);
 
-       if (frame.empty()) {
-           std::cerr << "Error: Captured empty frame!" << std::endl;
-           return;
-       }
+    std::ifstream file(fileName, std::ios::binary);
+    if (!file) {
+        std::cerr << "Failed to open raw file: " << fileName << std::endl;
+        return;
+    }
 
-       // Convert the captured frame to the format expected by the framebuffer
-       cv::cvtColor(frame, frame, cv::COLOR_BGR2BGRA); // Convert BGR to BGRA format
+    // Read raw file directly into the framebuffer
+    file.read(reinterpret_cast<char*>(framebuffer), width * height * 4);
+    if (!file) {
+        std::cerr << "Error reading raw file: " << fileName << std::endl;
+        return;
+    }
 
-       // Copy the frame data into the framebuffer
-       memcpy(framebuffer, frame.data, width * height * BYTES_PER_PIXEL);
+    // Increment the frame count for the next call
+    frameCount++;
+    if(frameCount>824)
+    frameCount=1;
+}
 
-       cap.release(); // Release the camera
-   }
 
-private:
+public:
     uint32_t width;
     uint32_t height;
     int port;
@@ -176,21 +160,20 @@ private:
 };
 
 int main() {
-    VncServer vncServer(640, 480, 5900);
-
-    if (!vncServer.start()) {
+    VncServer vncServer(960, 540, 5900);
+   if (!vncServer.start()) {
         return EXIT_FAILURE;
     }
 
-    const auto frameInterval = std::chrono::milliseconds(83); // ~12 FPS
-    while (true) {
+    const auto frameInterval = std::chrono::milliseconds(42); // ~12 FPS
+   while (true) {
         auto start_time = std::chrono::steady_clock::now();
 
         // Capture the screen and update the framebuffer
         vncServer.captureScreen();
 
          // Update the framebuffer in the VNC server
-         vncServer.updateFramebuffer(vncServer.getFramebuffer(), 640 * 480 * BYTES_PER_PIXEL);
+         vncServer.updateFramebuffer(vncServer.getFramebuffer(), vncServer.width * vncServer.height * BYTES_PER_PIXEL);
 
          auto end_time = std::chrono::steady_clock::now();
          std::chrono::milliseconds frame_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
@@ -199,6 +182,5 @@ int main() {
              std::this_thread::sleep_for(frameInterval - frame_duration);
          }
      }
-    
      return EXIT_SUCCESS;
 }
